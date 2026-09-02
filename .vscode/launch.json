@@ -1,0 +1,40 @@
+{
+    // https://code.visualstudio.com/docs/editor/debugging
+    // Shell redirects (e.g. > catalog.json) are not applied here—args go straight to Python.
+    // After debug, redirect in the integrated terminal if you need files on disk.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "tap-zendesk discover",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "tap_zendesk.tap",
+            "cwd": "${workspaceFolder}/.secrets",
+            "args": [
+                "--config",
+                "config.json",
+                "--discover"
+            ],
+            "console": "integratedTerminal",
+            "python": "${workspaceFolder}/.venv/bin/python3"
+        },
+        {
+            "name": "tap-zendesk get",
+            "type": "debugpy",
+            "request": "launch",
+            "justMyCode": false,
+            "module": "tap_zendesk.tap",
+            "cwd": "${workspaceFolder}/.secrets",
+            "args": [
+                "--config",
+                "config.json",
+                "--state",
+                "state.json",
+                "--catalog",
+                "selected-catalog.json"
+            ],
+            "console": "integratedTerminal",
+            "python": "${workspaceFolder}/.venv/bin/python3"
+        }
+    ]
+}
