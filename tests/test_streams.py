@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -44,6 +44,11 @@ class FakeResponse:
     def json(self) -> dict:
         return self._payload
 
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            msg = f"{self.status_code} error"
+            raise RuntimeError(msg)
+
 
 def make_tap() -> TapZendesk:
     return TapZendesk(config=SAMPLE_CONFIG, parse_env_config=False)
@@ -51,6 +56,26 @@ def make_tap() -> TapZendesk:
 
 def get_stream(name: str) -> Any:
     return make_tap().streams[name]
+
+
+class FakeAuth:
+    """Stands in for the OAuth authenticator, which would otherwise refresh."""
+
+    auth_headers: ClassVar[dict] = {}
+
+
+def stub_http(stream: Any, pages: list[dict]) -> list[str]:
+    """Point a stream at canned responses and record the URLs it requests."""
+    calls: list[str] = []
+
+    class Session:
+        def get(self, url: str, **kwargs: Any) -> FakeResponse:
+            calls.append(url)
+            return FakeResponse(pages[min(len(calls) - 1, len(pages) - 1)])
+
+    stream.__dict__["authenticator"] = FakeAuth()
+    stream._requests_session = Session()
+    return calls
 
 
 # --------------------------------------------------------------------------
@@ -547,3 +572,79 @@ def test_child_stream_still_raises_on_other_errors(name: str) -> None:
     stream = get_stream(name)
     with pytest.raises(Exception, match="boom"):
         stream.validate_response(FakeResponse({"error": "boom"}, status_code=500))
+
+
+# --------------------------------------------------------------------------
+# Review findings
+# --------------------------------------------------------------------------
+
+
+def test_multiselect_custom_field() -> None:
+    """Zendesk user/org fields can be multiselect; the pre-SDK map had no entry."""
+    assert process_custom_field(
+        {
+            "key": "k",
+            "title": "T",
+            "type": "multiselect",
+            "custom_field_options": [{"value": "a"}, {"value": "b"}],
+        },
+    ) == {"type": ["array", "null"], "items": {"type": "string", "enum": ["a", "b"]}}
+
+
+def test_an_unmappable_field_type_does_not_abort_discovery() -> None:
+    """A future Zendesk type must not take the whole catalog down with it."""
+    stream = make_tap().streams["organizations"]
+    stream.fetch_custom_fields = lambda: [  # type: ignore[method-assign]
+        {"key": "k", "title": "T", "type": "some_future_type"},
+    ]
+    stream.merge_custom_fields()
+    assert "properties" not in stream.schema["properties"]["organization_fields"]
+
+
+def test_custom_fields_are_paginated() -> None:
+    """These endpoints page 100 at a time; page two must not be dropped."""
+    stream = make_tap().streams["users"]
+    calls = stub_http(
+        stream,
+        [
+            {"user_fields": [{"key": "a", "type": "text", "title": "A"}], "next_page": "p2"},
+            {"user_fields": [{"key": "b", "type": "text", "title": "B"}], "next_page": None},
+        ],
+    )
+    stream.merge_custom_fields()
+    assert len(calls) == 2
+    assert sorted(stream.schema["properties"]["user_fields"]["properties"]) == ["a", "b"]
+
+
+def test_custom_field_pagination_stops_on_a_repeated_link() -> None:
+    """Guard the invariant: stop unless the link moved."""
+    stream = make_tap().streams["users"]
+    calls = stub_http(stream, [{"user_fields": [], "next_page": "same"}])
+    stream.merge_custom_fields()
+    assert len(calls) == 2
+
+
+def test_group_membership_without_updated_at_does_not_break_state() -> None:
+    """These records are emitted; the SDK would raise KeyError bookmarking them."""
+    stream = make_tap().streams["group_memberships"]
+    stream._increment_stream_state({"id": 9, "updated_at": "2024-01-01T00:00:00Z"})
+    before = json.dumps(stream.stream_state)
+    stream._increment_stream_state({"id": 7})  # must not raise
+    assert json.dumps(stream.stream_state) == before
+
+
+def test_satisfaction_ratings_sends_start_time_on_every_page() -> None:
+    """Zendesk needs the original filters alongside the cursor."""
+    stream = get_stream("satisfaction_ratings")
+    first = stream.get_url_params(None, None)
+    later = stream.get_url_params(None, "CURSOR")
+    assert first["start_time"] == later["start_time"]
+    assert later["page[after]"] == "CURSOR"
+
+
+def test_streams_without_extra_params_are_unaffected() -> None:
+    stream = get_stream("groups")
+    assert stream.get_url_params(None, "CURSOR") == {
+        "page[size]": 100,
+        "page[after]": "CURSOR",
+    }

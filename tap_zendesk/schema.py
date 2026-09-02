@@ -54,6 +54,9 @@ CUSTOM_TYPES = {
     "decimal": "number",
     "checkbox": "boolean",
     "lookup": "string",
+    # Not in the pre-SDK tap's map, which raised on it. A multiselect holds
+    # several option values, so it is an array of the option strings.
+    "multiselect": "array",
 }
 
 
@@ -78,9 +81,14 @@ def process_custom_field(field: dict) -> dict:
         )
         raise ValueError(msg)
 
+    options = [o["value"] for o in field.get("custom_field_options") or []]
+
+    if zendesk_type == "multiselect":
+        return {"type": ["array", "null"], "items": {"type": "string", "enum": options}}
+
     field_schema: dict = {"type": [json_type, "null"]}
     if zendesk_type == "date":
         field_schema["format"] = "datetime"
     if zendesk_type == "dropdown":
-        field_schema["enum"] = [o["value"] for o in field.get("custom_field_options") or []]
+        field_schema["enum"] = options
     return field_schema

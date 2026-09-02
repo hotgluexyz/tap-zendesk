@@ -186,6 +186,27 @@ class GroupMembershipsStream(CursorPaginatedStream):
             )
         return super().post_process(row, context)
 
+    @override
+    def _increment_stream_state(
+        self,
+        latest_record: dict,
+        *,
+        context: dict | None = None,
+    ) -> None:
+        """Skip bookmarking records that arrive without the replication key.
+
+        The pre-SDK tap emitted these memberships and simply did not advance
+        its bookmark for them. The SDK indexes the record by replication key
+        unconditionally, which raises KeyError and aborts the stream.
+
+        Args:
+            latest_record: The record just emitted.
+            context: The stream context.
+        """
+        if not latest_record.get(self.replication_key):
+            return
+        super()._increment_stream_state(latest_record, context=context)
+
 
 class SatisfactionRatingsStream(CursorPaginatedStream):
     """Stream for ``satisfaction_ratings``."""
@@ -198,24 +219,19 @@ class SatisfactionRatingsStream(CursorPaginatedStream):
     schema = load_schema("satisfaction_ratings")
 
     @override
-    def get_url_params(
-        self,
-        context: dict | None,
-        next_page_token: Any | None,
-    ) -> dict[str, Any]:
+    def extra_params(self, context: dict | None) -> dict[str, Any]:
         """Filter server-side with ``start_time``, as the pre-SDK tap did.
+
+        Sent on every page, not just the first: Zendesk expects the original
+        query parameters alongside the cursor.
 
         Args:
             context: The stream context.
-            next_page_token: The next page index or value.
 
         Returns:
-            A dictionary of URL query parameters.
+            A dictionary of extra URL query parameters.
         """
-        params = super().get_url_params(context, next_page_token)
-        if not next_page_token:
-            params["start_time"] = self.start_time_epoch(context)
-        return params
+        return {"start_time": self.start_time_epoch(context)}
 
 
 class TicketFormsStream(OffsetPaginatedStream):

@@ -213,9 +213,24 @@ class CursorPaginatedStream(ZendeskStream):
             A dictionary of URL query parameters.
         """
         params: dict[str, Any] = {"page[size]": self.page_size}
+        # The pre-SDK tap mutated one params dict across pages, so filters such
+        # as `start_time` were resent on every cursor request. Zendesk needs
+        # them, or later pages fall outside the intended window.
+        params.update(self.extra_params(context))
         if next_page_token:
             params["page[after]"] = next_page_token
         return params
+
+    def extra_params(self, context: dict | None) -> dict[str, Any]:
+        """Return query params to send with every request.
+
+        Args:
+            context: The stream context.
+
+        Returns:
+            A dictionary of extra URL query parameters.
+        """
+        return {}
 
 
 class OffsetPaginatedStream(ZendeskStream):
@@ -365,13 +380,29 @@ class CustomFieldsMixin:
         Returns:
             The custom field definitions.
         """
-        response = self.requests_session.get(
-            self.url_base + self.custom_fields_path,
-            headers={**self.http_headers, **self.authenticator.auth_headers},
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        return response.json().get(self.custom_fields_key) or []
+        fields: list[dict] = []
+        url = self.url_base + self.custom_fields_path
+        params: dict[str, Any] | None = {"per_page": self.page_size}
+        seen: set[str] = set()
+        while url:
+            response = self.requests_session.get(
+                url,
+                params=params,
+                headers={**self.http_headers, **self.authenticator.auth_headers},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            fields.extend(payload.get(self.custom_fields_key) or [])
+            # These endpoints page 100 at a time; an account with more custom
+            # fields than that would otherwise lose everything after page one.
+            next_page = payload.get("next_page")
+            # Guard the actual invariant: stop unless the link moved.
+            if not next_page or next_page in seen:
+                break
+            seen.add(next_page)
+            url, params = next_page, None
+        return fields
 
     def merge_custom_fields(self) -> None:
         """Declare a typed property for each of the account's custom fields.
@@ -382,16 +413,20 @@ class CustomFieldsMixin:
         """
         try:
             fields = self.fetch_custom_fields()
+            # `schema` is a class attribute, so copy before mutating rather than
+            # editing the dict that every instance of this stream shares.
+            schema = deepcopy(self.schema)
+            schema["properties"][self.custom_fields_property]["properties"] = {
+                field["key"]: process_custom_field(field) for field in fields
+            }
         except Exception:  # noqa: BLE001
+            # Inside the guard on purpose: an unmapped field type or a missing
+            # schema property should leave the static schema in place, not
+            # abort discovery for every stream.
             self.logger.warning(
-                "The account credentials supplied do not have access to `%s` custom fields.",
+                "Could not add `%s` custom fields to the schema; the credentials "
+                "may lack the scope, or a field type may be unsupported.",
                 self.name,
             )
-            return
-        # `schema` is a class attribute, so copy before mutating rather than
-        # editing the dict that every instance of this stream shares.
-        schema = deepcopy(self.schema)
-        schema["properties"][self.custom_fields_property]["properties"] = {
-            field["key"]: process_custom_field(field) for field in fields
-        }
-        self.schema = schema
+        else:
+            self.schema = schema
