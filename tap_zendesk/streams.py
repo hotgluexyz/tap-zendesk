@@ -6,10 +6,12 @@ from datetime import datetime, timezone
 from typing import Any, ClassVar
 
 from hotglue_singer_sdk.streams import RESTStream
+from requests.exceptions import HTTPError
 from singer import utils
 from typing_extensions import override
 
 from tap_zendesk.client import (
+    HTTP_NOT_FOUND,
     CursorPaginatedStream,
     CustomFieldsMixin,
     IncrementalExportStream,
@@ -81,6 +83,20 @@ class UsersStream(CustomFieldsMixin, IncrementalExportStream):
     records_jsonpath = "$.users[*]"
     schema = load_schema("users")
 
+    @override
+    def access_check_params(self) -> dict[str, Any]:
+        """Probe from `now`, as the pre-SDK tap did.
+
+        Its comment: "Used utcnow to reduce API call burden at discovery time,
+        because API will return records from now which will be very less."
+        Probing from `start_date` would ask for real data just to answer a
+        permissions question.
+
+        Returns:
+            A dictionary of URL query parameters.
+        """
+        return {"per_page": 1, "start_time": int(datetime.now(timezone.utc).timestamp())}
+
 
 class OrganizationsStream(CustomFieldsMixin, OffsetPaginatedStream):
     """Stream for ``organizations``."""
@@ -106,6 +122,18 @@ class OrganizationsStream(CustomFieldsMixin, OffsetPaginatedStream):
             A dictionary of extra URL query parameters.
         """
         return {"start_time": self.start_time_epoch(context)}
+
+    @override
+    def access_check_params(self) -> dict[str, Any]:
+        """Probe from `now`, as the pre-SDK tap did.
+
+        See `UsersStream.access_check_params` — the pre-SDK tap deliberately
+        probed both of these endpoints from `now` to keep the response empty.
+
+        Returns:
+            A dictionary of URL query parameters.
+        """
+        return {"per_page": 1, "start_time": int(datetime.now(timezone.utc).timestamp())}
 
 
 class GroupsStream(CursorPaginatedStream):
@@ -277,6 +305,29 @@ class TicketChildStream(OffsetPaginatedStream):
             return
         super()._write_schema_message()
         self._schema_written = True
+
+    @override
+    def access_check_path(self) -> str:
+        """Probe against ticket 1, as the pre-SDK tap did.
+
+        Returns:
+            The path to request.
+        """
+        return self.path.format(ticket_id=1)
+
+    @override
+    def check_access(self) -> None:
+        """Tolerate a 404 from the probe ticket.
+
+        The pre-SDK tap swallowed it too: a missing ticket 1 says nothing about
+        whether the token may read the stream.
+        """
+        try:
+            super().check_access()
+        except HTTPError as err:
+            if err.response is not None and err.response.status_code == HTTP_NOT_FOUND:
+                return
+            raise
 
     @override
     def validate_response(self, response: Any) -> None:

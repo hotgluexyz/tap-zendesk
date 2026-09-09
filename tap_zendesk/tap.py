@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from hotglue_etl_exceptions import InvalidCredentialsError
 from hotglue_singer_sdk import Stream, Tap
 from hotglue_singer_sdk import typing as th  # JSON schema typing helpers
 from hotglue_singer_sdk.authenticators import OAuthAuthenticator
@@ -14,7 +15,7 @@ from tap_zendesk.auth import (
     ZendeskAuthenticator,
     token_endpoint_for,
 )
-from tap_zendesk.client import CustomFieldsMixin
+from tap_zendesk.client import CustomFieldsMixin, StreamForbiddenError
 from tap_zendesk.streams import STREAM_TYPES
 
 CONFIG_JSONSCHEMA = th.PropertiesList(
@@ -49,7 +50,10 @@ CONFIG_JSONSCHEMA = th.PropertiesList(
     ),
     th.Property(
         "request_timeout",
-        th.NumberType,
+        # A string is accepted too: the pre-SDK tap coerced with `float()`, and
+        # config renderers emit numbers as strings. `th.Property` appends "null"
+        # itself, so it must not be listed here.
+        th.CustomType({"type": ["number", "string"]}),
         description="Request timeout in seconds",
         default=300,
     ),
@@ -70,17 +74,6 @@ CONFIG_JSONSCHEMA = th.PropertiesList(
     ),
 ).to_dict()
 
-# `request_timeout` accepts a string as well as a number: the pre-SDK tap
-# coerced with `float()`, and config renderers emit numbers as strings.
-# Widened here because `th.Property` appends "null" to the declared type,
-# which would nest the list if it were declared as a CustomType above.
-
-# `request_timeout` accepts a string as well as a number: the pre-SDK tap coerced
-# with `float()`, and config renderers emit numbers as strings. Widened here
-# because `th.Property` appends "null" to the declared type, which would nest the
-# list if it were declared as a CustomType above.
-CONFIG_JSONSCHEMA["properties"]["request_timeout"]["type"] = ["number", "string", "null"]
-
 
 class TapZendesk(Tap):
     """Singer tap for Zendesk."""
@@ -94,13 +87,53 @@ class TapZendesk(Tap):
         """Return a list of discovered streams."""
         return [stream_class(tap=self) for stream_class in STREAM_TYPES]
 
+    def check_stream_access(self) -> None:
+        """Report streams the credentials cannot read, as the pre-SDK tap did.
+
+        Every stream is still added to the catalog — that is what the pre-SDK
+        tap did, appending outside the permission check — but the unreadable
+        ones are named in a warning so the cause is visible up front rather
+        than surfacing as a mid-sync failure. If nothing is readable at all the
+        run stops, since there is no data to collect.
+
+        Raises:
+            InvalidCredentialsError: If no stream can be read.
+        """
+        forbidden = []
+        for stream in self.streams.values():
+            try:
+                stream.check_access()
+            except StreamForbiddenError:
+                forbidden.append(stream.name)
+
+        if not forbidden:
+            return
+
+        names = ", ".join(sorted(forbidden))
+        if len(forbidden) != len(self.streams):
+            self.logger.warning(
+                "The account credentials supplied do not have 'read' access to the "
+                "following stream(s): %s. The data for these streams would not be "
+                "collected due to lack of required permission.",
+                names,
+            )
+            return
+
+        msg = (
+            "HTTP-error-code: 403, Error: The account credentials supplied do not have "
+            "'read' access to any of streams supported by the tap. Data collection "
+            "cannot be initiated due to lack of permissions."
+        )
+        raise InvalidCredentialsError(msg)
+
     @override
     def run_discovery(self) -> str:
-        """Add the account's custom fields to the catalog before emitting it.
+        """Check read access and add custom fields before emitting the catalog.
 
         Returns:
             The discovered catalog as JSON.
         """
+        self.check_stream_access()
         for stream in self.streams.values():
             if isinstance(stream, CustomFieldsMixin):
                 stream.merge_custom_fields()

@@ -18,6 +18,12 @@ from typing_extensions import override
 from tap_zendesk.schema import process_custom_field
 
 PAGE_SIZE = 100
+HTTP_FORBIDDEN = 403
+HTTP_NOT_FOUND = 404
+
+
+class StreamForbiddenError(Exception):
+    """Raised when the credentials cannot read a particular stream."""
 
 
 class ZendeskStream(RESTStream):
@@ -147,6 +153,53 @@ class ZendeskStream(RESTStream):
         with Transformer() as transformer:
             return transformer.transform(row, self.schema)
 
+    def extra_params(self, context: dict | None) -> dict[str, Any]:
+        """Return query params to send with every request for this stream.
+
+        Args:
+            context: The stream context.
+
+        Returns:
+            A dictionary of extra URL query parameters.
+        """
+        return {}
+
+    def access_check_path(self) -> str:
+        """Return the path used to probe read access.
+
+        Returns:
+            The path to request.
+        """
+        return self.path
+
+    def access_check_params(self) -> dict[str, Any]:
+        """Return the query params used to probe read access.
+
+        Returns:
+            A dictionary of URL query parameters.
+        """
+        return {"per_page": 1, **self.extra_params(None)}
+
+    def check_access(self) -> None:
+        """Confirm the token can read this stream.
+
+        Mirrors the pre-SDK tap, which probed every stream during discovery so
+        a token missing scopes was reported by name rather than failing part
+        way through a sync.
+
+        Raises:
+            StreamForbiddenError: If the credentials cannot read this stream.
+        """
+        response = self.requests_session.get(
+            self.url_base + self.access_check_path(),
+            params=self.access_check_params(),
+            headers={**self.http_headers, **self.authenticator.auth_headers},
+            timeout=self.timeout,
+        )
+        if response.status_code == HTTP_FORBIDDEN:
+            raise StreamForbiddenError(self.name)
+        response.raise_for_status()
+
     def start_time_epoch(self, context: dict | None) -> int:
         """Return the incremental start time as a Unix epoch.
 
@@ -221,31 +274,9 @@ class CursorPaginatedStream(ZendeskStream):
             params["page[after]"] = next_page_token
         return params
 
-    def extra_params(self, context: dict | None) -> dict[str, Any]:
-        """Return query params to send with every request.
-
-        Args:
-            context: The stream context.
-
-        Returns:
-            A dictionary of extra URL query parameters.
-        """
-        return {}
-
 
 class OffsetPaginatedStream(ZendeskStream):
     """Stream that follows Zendesk's ``next_page`` link."""
-
-    def extra_params(self, context: dict | None) -> dict[str, Any]:
-        """Return query params to send with the first request.
-
-        Args:
-            context: The stream context.
-
-        Returns:
-            A dictionary of extra URL query parameters.
-        """
-        return {}
 
     @override
     def get_next_page_token(
@@ -307,6 +338,15 @@ class IncrementalExportStream(ZendeskStream):
     """
 
     is_sorted = True
+
+    @override
+    def access_check_params(self) -> dict[str, Any]:
+        """Send `start_time`, which these endpoints require.
+
+        Returns:
+            A dictionary of URL query parameters.
+        """
+        return {"per_page": 1, "start_time": self.start_time_epoch(None)}
 
     @override
     def get_next_page_token(

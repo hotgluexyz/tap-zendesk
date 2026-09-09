@@ -14,12 +14,18 @@ SAMPLE_CONFIG = {
     "client_secret": "placeholder",
 }
 
-# _test_stream_connections makes live HTTP calls; excluded by default.
-# Replace SAMPLE_CONFIG placeholders with real credentials and call it directly.
+# These make live HTTP calls, so they are excluded by default. Replace the
+# SAMPLE_CONFIG placeholders with real credentials and call them directly.
+#
+# `_test_discovery` is here because `--discover` reaches the API on purpose: it
+# probes each stream for read access and fetches the account's custom fields,
+# both of which the pre-SDK tap also did at discovery time.
+_LIVE_TESTS = {"_test_stream_connections", "_test_discovery"}
+
 _STANDARD_TESTS = [
     t
     for t in get_standard_tap_tests(TapZendesk, config=SAMPLE_CONFIG)
-    if getattr(t, "__name__", "") != "_test_stream_connections"
+    if getattr(t, "__name__", "") not in _LIVE_TESTS
 ]
 
 

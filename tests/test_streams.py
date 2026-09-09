@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
+from datetime import datetime, timezone
 from typing import Any, ClassVar
 
 import pytest
+from requests.exceptions import HTTPError
 
 from tap_zendesk.auth import TOKEN_ENDPOINT, token_endpoint_for
 from tap_zendesk.client import (
     CursorPaginatedStream,
     IncrementalExportStream,
     OffsetPaginatedStream,
+    StreamForbiddenError,
 )
 from tap_zendesk.schema import load_schema, load_shared_schema_refs, process_custom_field
 from tap_zendesk.streams import (
@@ -47,7 +51,7 @@ class FakeResponse:
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
             msg = f"{self.status_code} error"
-            raise RuntimeError(msg)
+            raise HTTPError(msg, response=self)
 
 
 def make_tap() -> TapZendesk:
