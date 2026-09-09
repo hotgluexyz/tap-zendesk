@@ -652,3 +652,112 @@ def test_streams_without_extra_params_are_unaffected() -> None:
         "page[size]": 100,
         "page[after]": "CURSOR",
     }
+
+
+# --------------------------------------------------------------------------
+# Read-access checks (ported from the pre-SDK tap's check_access)
+# --------------------------------------------------------------------------
+
+
+def stub_access(tap: Any, forbidden: set[str]) -> None:
+    """Make each stream's access probe pass or return 403."""
+    for stream in tap.streams.values():
+        code = 403 if stream.name in forbidden else 200
+        stream.__dict__["authenticator"] = FakeAuth()
+        stream._requests_session = type(
+            "S",
+            (),
+            {"get": lambda _self, _url, _code=code, **_kw: FakeResponse({}, status_code=_code)},
+        )()
+
+
+def test_all_streams_stay_in_the_catalog_when_some_are_forbidden(caplog: Any) -> None:
+    """The pre-SDK tap appended every stream regardless, and only warned."""
+    tap = make_tap()
+    stub_access(tap, {"macros", "tags"})
+    with caplog.at_level(logging.WARNING):
+        tap.check_stream_access()
+    assert "macros, tags" in caplog.text
+    assert "do not have 'read' access" in caplog.text
+    assert len(tap.streams) == 14
+
+
+def test_no_warning_when_every_stream_is_readable(caplog: Any) -> None:
+    tap = make_tap()
+    stub_access(tap, set())
+    with caplog.at_level(logging.WARNING):
+        tap.check_stream_access()
+    assert "read' access" not in caplog.text
+
+
+def test_discovery_fails_when_no_stream_is_readable() -> None:
+    """The pre-SDK tap raised rather than emit a catalog it cannot sync."""
+    from hotglue_etl_exceptions import InvalidCredentialsError
+
+    tap = make_tap()
+    stub_access(tap, {s.name for s in tap.streams.values()})
+    with pytest.raises(InvalidCredentialsError, match="do not have 'read' access to any"):
+        tap.check_stream_access()
+
+
+def test_access_probe_asks_for_one_record() -> None:
+    assert get_stream("groups").access_check_params() == {"per_page": 1}
+
+
+def test_incremental_export_probe_sends_start_time() -> None:
+    """These endpoints reject a request without `start_time`."""
+    assert get_stream("tickets").access_check_params() == {
+        "per_page": 1,
+        "start_time": 1577836800,
+    }
+
+
+def test_satisfaction_ratings_probe_carries_its_filter() -> None:
+    assert get_stream("satisfaction_ratings").access_check_params() == {
+        "per_page": 1,
+        "start_time": 1577836800,
+    }
+
+
+@pytest.mark.parametrize("name", ["ticket_audits", "ticket_metrics", "ticket_comments"])
+def test_child_stream_probe_targets_ticket_one(name: str) -> None:
+    path = get_stream(name).access_check_path()
+    assert "{ticket_id}" not in path
+    assert path.startswith("/tickets/1/")
+
+
+@pytest.mark.parametrize("name", ["ticket_audits", "ticket_metrics", "ticket_comments"])
+def test_child_stream_probe_tolerates_a_missing_ticket(name: str) -> None:
+    """A 404 on ticket 1 says nothing about read permission."""
+    stream = get_stream(name)
+    stream.__dict__["authenticator"] = FakeAuth()
+    stream._requests_session = type(
+        "S",
+        (),
+        {"get": lambda _self, _url, **_kw: FakeResponse({}, status_code=404)},
+    )()
+    stream.check_access()
+
+
+def test_child_stream_probe_still_reports_forbidden() -> None:
+    stream = get_stream("ticket_audits")
+    stream.__dict__["authenticator"] = FakeAuth()
+    stream._requests_session = type(
+        "S",
+        (),
+        {"get": lambda _self, _url, **_kw: FakeResponse({}, status_code=403)},
+    )()
+    with pytest.raises(StreamForbiddenError):
+        stream.check_access()
+
+
+@pytest.mark.parametrize("name", ["users", "organizations"])
+def test_probe_uses_now_for_the_heavy_export_endpoints(name: str) -> None:
+    """The pre-SDK tap probed these from `now` to keep the response empty."""
+    params = get_stream(name).access_check_params()
+    assert abs(params["start_time"] - int(datetime.now(timezone.utc).timestamp())) < 5
+
+
+def test_tickets_probe_uses_start_date() -> None:
+    """The pre-SDK tap used `start_date` here, unlike users/organizations."""
+    assert get_stream("tickets").access_check_params()["start_time"] == 1577836800
