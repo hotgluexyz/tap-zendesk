@@ -1,0 +1,72 @@
+send_anonymous_usage_stats: true
+project_id: "tap-zendesk"
+default_environment: test
+requires_meltano: ">=4.0"
+environments:
+- name: test
+plugins:
+  extractors:
+  - name: "tap-zendesk"
+    namespace: "tap_zendesk"
+    pip_url: -e .
+    capabilities:
+    - state
+    - catalog
+    - discover
+    - about
+    - stream-maps
+    - structured-logging
+    - allows-fetch-access-token
+
+    settings:
+    - name: client_id
+      label: Client ID
+      description: OAuth client ID for the Zendesk OAuth app
+      sensitive: true
+
+    - name: client_secret
+      label: Client Secret
+      description: OAuth client secret for the Zendesk OAuth app
+      sensitive: true
+
+    - name: refresh_token
+      label: Refresh Token
+      description: OAuth refresh token for the Zendesk OAuth app
+      sensitive: true
+
+    - name: start_date
+      kind: date_iso8601
+      label: Start Date
+      description: Initial date to start extracting data from
+
+    - name: subdomain
+      label: Subdomain
+      description: Zendesk subdomain, i.e. the `acme` in `acme.zendesk.com`
+
+    - name: request_timeout
+      kind: integer
+      label: Request Timeout
+      description: Request timeout in seconds
+
+    - name: marketplace_name
+      label: Marketplace Name
+      description: Sent as the X-Zendesk-Marketplace-Name header
+
+    - name: marketplace_organization
+      label: Marketplace Organization Id
+      description: Sent as the X-Zendesk-Marketplace-Organization-Id header
+
+    - name: marketplace_app_id
+      label: Marketplace App Id
+      description: Sent as the X-Zendesk-Marketplace-App-Id header
+
+    settings_group_validation:
+    - [subdomain, client_id, client_secret, refresh_token]
+
+    config:
+      start_date: '2000-01-01T00:00:00Z'
+
+  loaders:
+  - name: target-jsonl
+    variant: andyh1203
+    pip_url: target-jsonl
